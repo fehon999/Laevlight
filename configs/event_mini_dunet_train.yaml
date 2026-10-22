@@ -1,0 +1,93 @@
+output_dir: outputs/event_mini_dunet_affine_ssim
+
+data:
+  name: eglol
+  #++++++++++++++++++++
+#  is_indoor: true
+  #++++++++++++++++++++
+  root_pre: "/home/user/Datasets/SDE/SDE_dataset/SDE_indoor/sde_in_release"
+  root_meta: "/home/user/Datasets/SDE/SDE_Dataset/SDE_dataset/SDE_outdoor/sde_out_release/sde_out_meta" # file path of dataset
+  train_split: train
+  query_split: validate
+  test_split: test
+  voxel_grid_channel: 32
+  # EvLight declares 260x346 source images but crops to 256x256 internally.
+  # This dataset takes the crop size directly.
+  img_height: 256
+  img_width: 256
+  is_split_event: true
+  # Training: 80% arbitrary non-target frame, 10% first frame, 10% no reference.
+  reference_first_probability: 0.1
+  reference_dropout_probability: 0
+  # Synchronized horizontal/vertical flips and square-crop transpose.
+  # Applied only to training/support samples; query/test remain deterministic.
+  geometric_augmentation: true
+
+loader:
+  batch_size: 8
+  num_workers: 8
+  drop_last: true
+  eval_batch_size: 1
+  test_batch_size: 1
+model:
+  IlluNet:
+    base_chs: 48
+    illumination_set: [0]
+  ImageNet:
+    snr_factor: 3
+    voxel_grid_channel: 32
+    base_chs: 48
+    snr_threshold_list: [0.6, 0.5, 0.4]
+  # Clean ablation switch: false removes the complete reference branch while
+  # leaving the EvLight backbone architecture and forward path unchanged.
+  ReferenceBranch:
+    enabled: true
+    encoder_blocks: 2
+    # Reference statistics predict bounded contrast/mean corrections to
+    # backbone features. A single gate controls the complete correction.
+    fusion_mode: reference_affine
+    #close or open reference
+    residual_scale: 0.1
+    statistics_eps: 0.000001
+    zero_init: true
+  name: MiniEventDUNet
+  event_channels: 32
+
+loss:
+  # Phi(theta, omega; D_tr), used by the SR/theta inner loop.
+  charbonnier_weight: 1.0
+  lpips_weight: 0.5
+  # Set to 0 for an ablation with the original reconstruction objective.
+  ssim_weight: 0.15
+  charbonnier_eps: 0.0001
+  lpips_net: alex
+  # Psi(theta, omega; D_query), used by the DE/omega outer loop.
+  psi_charbonnier_weight: 1.0
+  psi_lpips_weight: 0.5
+  omega_gamma: 1.0
+
+train:
+  amp: true
+  # The current optimizer is AdamW; zero weight decay matches EvLight's
+  # Adam update rule with the same default betas and epsilon.
+  weight_decay: 0
+  # false lets --resume initialize from an EvLight-only checkpoint. Set true
+  # when continuing an already augmented run and exact key matching is desired.
+  resume_strict: false
+  stages:
+    pretrain_all:
+      # One optimizer/backward pass jointly trains EvLight and the adapter.
+      epochs: 80
+      lr: 0.00015
+      lr_scheduler: cosine
+      min_lr: 0.00000001
+
+
+
+    bilevel_reference_outer:
+      # omega/meta: only the reference frame_encoder.
+      # theta/task: EvLight + current_encoder + statistics gate + linear fusion.
+      epochs: 0
+      inner_steps: 2
+      lr_recovery: 0.00003
+      lr_meta: 0.00001
