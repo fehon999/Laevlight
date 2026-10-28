@@ -107,9 +107,9 @@ class DataAugmentationTest(unittest.TestCase):
         with patch("adaptpro.data.get_eglol_withNE_dataset") as factory:
             get_dataset(dict(name="get_eglol_withNE_dataset", root="unused", img_height=4,
                              img_width=4, voxel_grid_channel=4, geometric_augmentation=True))
-        train, query, test = [call.kwargs for call in factory.call_args_list]
+        train, test = [call.kwargs for call in factory.call_args_list]
         self.assertTrue(train["geometric_augmentation"])
-        for evaluation in (query, test):
+        for evaluation in (test,):
             self.assertFalse(evaluation["is_train"])
             self.assertFalse(evaluation.get("geometric_augmentation", False))
 

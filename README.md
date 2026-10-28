@@ -1,100 +1,131 @@
-# EvLight reference-frame adapter
+# EvLight 单阶段训练项目
 
-本仓库使用 EvLight 作为低照度图像–事件融合 backbone，并增加了一个可独立开关的参考帧特征分支：
+本项目使用 EvLight 低照度图像–事件融合主干和参考帧特征分支。原来的 `pretrain_all` 现为完整训练过程：所有网络参数由同一个优化器联合更新，训练结束即可直接推理。网络的构造、初始化和前向计算保持不变。
 
-```text
-low RGB + events -> EvLight preprocessing/fusion -> holistic feature --------+
-light-up RGB -> current encoder -> channel mean/std --------+                 +--> ReFormer -> pred
-reference RGB -> reference encoder -> channel mean/std -----+-> single gate + bounded affine-+
-```
+## 四个数据集独立配置
 
-参考分支只在 `Unet_ReFormer` 之前做一次残差注入，不改 EvLight 的编码器、SNR 区域选择或解码器结构。最终投影使用零初始化，因此新分支刚加入预训练 EvLight 时，网络输出与未加入分支时相同。
+每份 YAML 都包含完整的 `data`、`loader`、`model`、`loss`、`train` 和 `inference` 设置，可以分别修改，不需要组合其他配置。
 
-## 训练
+| 数据集 | 配置文件 | 数据读取器 | 逐帧事件所在目录 | 训练输出 |
+|---|---|---|---|---|
+| SDE 室内 | `configs/sde_in.yaml` | EGLOL | `low/` | `outputs/sde_in/` |
+| SDE 室外 | `configs/sde_out.yaml` | EGLOL | `low/` | `outputs/sde_out/` |
+| SDSD 室内 | `configs/sdsd_in.yaml` | SDSD，`is_indoor: true` | `low/` | `outputs/sdsd_in/` |
+| SDSD 室外 | `configs/sdsd_out.yaml` | SDSD，`is_indoor: false` | `normal/` | `outputs/sdsd_out/` |
 
-```bash
-python train_event_dunet.py --config configs/event_mini_dunet_train.yaml
-```
-
-首先修改配置中的数据路径。数据目录格式为：
+首先把各配置的 `data.root` 改成实际数据根目录。当前 `data/sde_in` 等值是占位路径，根目录应直接包含 `train/` 和 `test/`。从项目根目录运行下面的命令；数据路径可以使用绝对路径。
 
 ```text
-root/
-  train|validate|test/
+实际数据根目录/
+  train/
     sequence_name/
       low/
-        *.png
-        *.npz
+        *.png                 # 低光图像
+        *.npz                 # SDE / SDSD 室内逐帧事件
       normal/
-        *.png
+        *.png                 # 正常光 GT / 参考图像
+        *.npz                 # SDSD 室外逐帧事件
+  test/
+    sequence_name/
+      low/
+      normal/
 ```
 
-每个样本包含：
+四份配置均使用 `is_split_event: true`。事件文件中的 `arr_0` 为按时间升序排列的 `[N, 4]` 数组，列顺序为时间、x、y、极性；图像和对应事件按文件名排序配对。SDSD 延续原读取流程，对帧和逐帧事件列表执行 `[3:-2]` 截取。训练只读取 `train_split` 和 `test_split`，无需额外数据划分。
 
-```text
-low, event, gt, img_refer, reference_valid, ill_list
-```
+## 安装与训练
 
-训练时从同一序列随机选择非当前帧的正常光图像作为参考；验证和测试固定选择首个可用的非当前帧。参考丢弃样本使用全零图，并通过 `reference_valid=false` 完全关闭注入，避免分支偏置影响输出。
-
-训练和微调配置默认开启 `data.geometric_augmentation: true`，与 `evlight_refer` 示例一致：随机裁剪后，以各 50% 概率执行水平翻转、垂直翻转，方形裁剪另以 50% 概率转置。低光图、GT、参考帧、模糊图、光照先验和事件体素使用同一空间变换，事件的时间通道和极性不变。非方形裁剪不转置，避免批次尺寸不一致；query、验证和测试保持中心裁剪，不做随机增强。设为 `false` 可关闭新增增强；带 seed 的读取接口可复现增强。
-
-默认配置使用 **80 轮单阶段联合训练**，主干和参考分支由同一个优化器、同一次反向传播更新，不冻结分支，不执行双层训练（`bilevel_reference_outer.epochs: 0`）。`train.stages.pretrain_all.lr` 为 `0.0002`，`min_lr` 为 `0.00000001`，每轮结束后更新 cosine 学习率，`T_max` 跟随 `epochs`。训练日志显示当轮实际学习率。将 `lr_scheduler` 改为 `constant` 可使用固定学习率。
-
-训练目标为 `Charbonnier + 0.5 * LPIPS + 0.1 * (1 - SSIM)`。新增的 `loss.ssim_weight` 默认为 0（兼容旧配置），当前训练配置设为 0.1；SSIM 损失在关闭 autocast 的 FP32 中计算，使用与当前指标一致的 RGB、11×11 窗口和范围。不会修改测试指标或使用 GT 做亮度校正。是否改善 PSNR/SSIM 必须通过实验判断。
-
-新实验输出保存到 `outputs/event_mini_dunet_affine_ssim`，推理配置同步使用该目录。`best.pt` 仍按现有流程中的最高测试 PSNR 保存，并非最高 SSIM；正式对比应使用独立验证集选模型，测试集只用于最终报告。
-
-当前 `--resume` 仅加载模型权重，学习率调度会从第一轮重新开始，不恢复优化器或调度器进度。
-
-## 参考分支配置与消融
-
-```yaml
-model:
-  ReferenceBranch:
-    enabled: true
-    encoder_blocks: 2
-    fusion_mode: reference_affine
-    residual_scale: 0.1
-    statistics_eps: 0.000001
-    zero_init: true
-```
-
-`reference_affine` 根据当前帧和参考帧的特征均值/标准差预测通道缩放和偏移，经 `tanh` 限幅后，用一次门控修正主干特征。空间内容始终来自主干，不拷贝参考帧纹理。修正公式为 `F + alpha * gate * (contrast * (F - mean(F)) + shift * std(F))`，其中 `contrast` 和 `shift` 均在 [-1, 1]，最后投影零初始化。无效参考的修正为零，`residual_scale: 0` 关闭注入。
-
-**新模式应启动一次新训练，不要直接用 `--resume` 加载旧 `latent_stats` 参考分支权重**：融合层形状不同，即使 `strict: false` 也不能跳过同名层的形状冲突。旧模式仍可通过原配置加载旧权重。
-
-建议至少报告以下消融（固定数据、主干初始化、训练步数与评估流程，最终复核多个种子）：
-
-| 实验 | `enabled` | `fusion_mode` | 说明 |
-|---|---:|---|---|
-| EvLight baseline | false | — | 完全不构建参考分支 |
-| Reference affine | true | `reference_affine` | 有界亮度/对比度修正，当前训练配置 |
-| Latent concat | true | `latent_stats` | 原参考均值调制 + `1x1` Linear |
-| Spatial align | true | `spatial_align` | 旧 flow 对齐融合，仅用于消融 |
-
-分别将 `loss.ssim_weight` 设为 0 和 0.1，并比较零注入与参考注入，可以区分结构约束和参考分支的收益；同一参考模型还应比较正确参考和打乱参考。请为不同实验指定不同输出目录。
-
-以下参数分组保留供旧双层训练/微调流程使用，默认联合训练不分别更新它们：
-
-- `model.meta_parameters()` / `model.reference_parameters()`：仅 `ReferenceBranch.frame_encoder`，即参考特征提取元表示 `omega`。
-- `model.recovery_parameters()` / `model.task_parameters()`：EvLight、当前帧编码、统计门控和线性融合，即任务变量 `theta`。
-
-双层训练的 outer loop 只更新参考帧特征提取器；任务微调冻结该编码器，重置并更新其余任务模块。
-
-## 微调与推理
+在具有合适 PyTorch 环境的终端安装依赖：
 
 ```bash
-python finetune_event_dunet.py \
-  --config configs/event_mini_dunet_finetune.yaml \
-  --checkpoint outputs/event_mini_dunet_global/best.pt
-
-python infer_event_dunet.py \
-  --config configs/event_mini_dunet_infer.yaml \
-  --checkpoint outputs/event_mini_dunet_affine_ssim/best.pt
+python -m pip install -r requirements.txt
 ```
 
-微调示例沿用旧 `latent_stats` 配置及其旧权重，是可选的独立流程，不是当前联合训练的必需步骤。新模式直接使用训练与推理命令即可。恢复参考模型时必须保持 `fusion_mode`、`residual_scale`、SNR 设置一致，并使用严格加载核对参数。
+根据数据集选择一条命令：
 
-更完整的设计依据和实验建议见 [docs/reference_branch.md](docs/reference_branch.md)。
-"# adapt_second" 
+```bash
+python train_event_dunet.py --config configs/sde_in.yaml
+python train_event_dunet.py --config configs/sde_out.yaml
+python train_event_dunet.py --config configs/sdsd_in.yaml
+python train_event_dunet.py --config configs/sdsd_out.yaml
+```
+
+`--config` 必须显式指定。四份配置先沿用修改前的预训练设置，数据路径、读取协议和输出目录按数据集区分；具体超参数可以在对应配置中独立调整。
+
+| 设置 | 当前值 |
+|---|---|
+| 训练轮数 | `train.epochs: 50` |
+| 优化器 | AdamW，全部模型参数共同更新 |
+| 初始学习率 | `train.lr: 0.00015` |
+| 学习率调度 | cosine，每轮结束后更新，最低 `0.00000001` |
+| 权重衰减 | `train.weight_decay: 0` |
+| 训练批次 / 工作进程 | `8 / 8`，`drop_last: true` |
+| 测试批次 | `1` |
+| 图像裁剪 / 事件通道 | `256×256 / 32` |
+| 混合精度 | `train.amp: true`，仅 CUDA 启用 |
+| 损失 | `Charbonnier + 0.5 × LPIPS`，`ssim_weight: 0` |
+
+每个训练批次进行一次前向、一次反向传播和一次优化器更新。每轮完成后测试并保存模型，然后更新学习率。训练结束再测试一次，保存最后一轮权重。
+
+各数据集输出目录包含：
+
+- `pretrain_all_latest.pt`：最近一轮权重与训练轮数、配置、测试结果。
+- `best.pt`：测试 PSNR 最高的一轮权重。
+- `global_last.pt`：全部训练结束后的权重与最终测试结果。
+
+这些文件名沿用原预训练流程。`best.pt` 继续按测试 PSNR 选取，因此该测试集参与了模型选择，不能将其当作完全独立的最终评估集。
+
+初始化已有权重时使用：
+
+```bash
+python train_event_dunet.py --config configs/sde_in.yaml --resume outputs/sde_in/best.pt
+```
+
+`--resume` 仅加载模型权重；训练轮数、优化器和学习率调度从第一轮重新开始。完整参考分支权重需要匹配原来的网络配置；`resume_strict: false` 可用于只有 EvLight 主干的权重，但不能跳过同名参数的形状冲突。
+
+## 推理
+
+推理和训练使用同一份数据集配置，其中 `inference.checkpoint` 默认指向该数据集自己的 `best.pt`：
+
+```bash
+python infer_event_dunet.py --config configs/sde_in.yaml
+python infer_event_dunet.py --config configs/sde_out.yaml
+python infer_event_dunet.py --config configs/sdsd_in.yaml
+python infer_event_dunet.py --config configs/sdsd_out.yaml
+```
+
+推理只加载所选数据划分。默认读取 `test/`；可以覆盖权重、划分目录和输出目录：
+
+```bash
+python infer_event_dunet.py --config configs/sde_in.yaml --checkpoint outputs/sde_in/global_last.pt --split test --output-dir outputs/sde_in/final_inference
+```
+
+`--split` 指定 `data.root` 下的目录名。`--save-gt` 额外保存 GT，`--strict` 强制严格加载权重；四份配置默认已设 `inference.strict: true`。
+
+当 `--split` 为 `train` 或 `test` 时，分别采用配置中的 `data.train_split` 或 `data.test_split`；其他值直接作为划分目录名。只准备测试目录也可以推理。
+
+## 参考分支与数据处理
+
+四份配置均使用 `ReferenceBranch.enabled: true`、`fusion_mode: reference_affine`、`encoder_blocks: 2` 和 `residual_scale: 0.1`。主干特征只在进入 `Unet_ReFormer` 前接受一次参考残差注入。最终投影零初始化，初始注入为零；当前帧编码器与参考帧编码器随后共同参与训练。
+
+推理中的参考仿射诊断只适用于 `reference_affine`。关闭参考分支或使用其他已有融合模式时，会自动跳过诊断，正常保存预测结果。
+
+训练参考来自同一序列的其他正常光帧，排除当前帧 GT。当前配置 `reference_first_probability: 0.1`、`reference_dropout_probability: 0`；测试固定选择首个可用的非当前帧。没有可用参考时使用零图，并通过 `reference_valid: false` 关闭注入。
+
+训练保留随机裁剪及同步水平翻转、垂直翻转，方形裁剪还可转置；低光图、GT、参考、模糊图、光照先验和事件采用同一空间变换。测试和推理保留中心裁剪，不做随机增强。
+
+项目说明：
+
+- [参考分支结构](docs/reference_branch.md)
+- [网络与训练数据流](docs/event_guided_dunet_flow.md)
+- [代码审阅与迁移说明](docs/pretrain_refactor.md)
+
+## 检查代码
+
+安装项目依赖后运行：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+当前 35 项测试通过，包括四类数据协议的合成数据训练与推理。旧版与新版的 CPU 数值对照、验证范围和未运行的真实数据实验见[代码审阅与迁移说明](docs/pretrain_refactor.md#验证结果)。

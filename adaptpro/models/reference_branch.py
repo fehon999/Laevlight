@@ -7,8 +7,6 @@ for existing checkpoints and ablations. All modes inject once before
 ``Unet_ReFormer``.
 """
 
-from itertools import chain
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -114,9 +112,8 @@ class ReferenceFeatureInjector(nn.Module):
         self.use_alignment = bool(use_alignment)
         self.zero_init = bool(zero_init)
 
-        # Only frame_encoder (the reference-frame extractor) is omega/meta.
-        # current_encoder has an identical initialization but independent task
-        # parameters, so no current-frame processing leaks into omega.
+        # Both encoders start in the same feature space and keep independent
+        # parameters throughout joint training.
         self.frame_encoder = SharedFrameEncoder(self.channels, int(encoder_blocks))
         self.current_encoder = SharedFrameEncoder(self.channels, int(encoder_blocks))
         self.current_encoder.load_state_dict(self.frame_encoder.state_dict())
@@ -185,56 +182,6 @@ class ReferenceFeatureInjector(nn.Module):
                 self.fusion_body = nn.Identity()
                 self.fusion_out = nn.Conv2d(fusion_channels, self.channels, 1)
         # Begin conservatively even when zero_init is disabled.
-        nn.init.constant_(
-            self.gate[-1].bias, 0.0 if self.fusion_mode == "reference_affine" else -1.0
-        )
-        if self.zero_init:
-            nn.init.zeros_(self.fusion_out.weight)
-            nn.init.zeros_(self.fusion_out.bias)
-
-    def reference_feature_parameters(self):
-        """Return only the reference-frame feature extractor (omega)."""
-
-        return self.frame_encoder.parameters()
-
-    def task_parameters(self):
-        """Return current encoding, fusion, gating, and injection parameters."""
-
-        task_modules = [
-            self.current_encoder,
-            self.gate,
-            self.fusion_in,
-            self.fusion_body,
-            self.fusion_out,
-        ]
-        if self.flow_predictor is not None:
-            task_modules.insert(1, self.flow_predictor)
-        return chain.from_iterable(
-            module.parameters() for module in task_modules
-        )
-
-    def reset_task_parameters(self):
-        """Reset task modules without modifying the reference feature extractor."""
-
-        task_modules = [
-            self.current_encoder,
-            self.gate,
-            self.fusion_in,
-            self.fusion_body,
-            self.fusion_out,
-        ]
-        if self.flow_predictor is not None:
-            task_modules.insert(1, self.flow_predictor)
-        for root_module in task_modules:
-            for module in root_module.modules():
-                if hasattr(module, "reset_parameters"):
-                    module.reset_parameters()
-        # Start each task adaptation in the same feature space as the learned
-        # reference meta encoder, while keeping current_encoder trainable theta.
-        self.current_encoder.load_state_dict(self.frame_encoder.state_dict())
-        if self.flow_predictor is not None:
-            nn.init.zeros_(self.flow_predictor[-1].weight)
-            nn.init.zeros_(self.flow_predictor[-1].bias)
         nn.init.constant_(
             self.gate[-1].bias, 0.0 if self.fusion_mode == "reference_affine" else -1.0
         )

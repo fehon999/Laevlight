@@ -13,9 +13,8 @@ import train_event_dunet
 
 class PretrainSchedulerTest(unittest.TestCase):
     def test_default_training_loop_uses_configured_cosine(self):
-        cfg = read_config(Path(__file__).resolve().parents[1] / "configs/event_mini_dunet_train.yaml")
-        cfg["train"]["stages"]["bilevel_reference_outer"]["epochs"] = 0
-        stage = cfg["train"]["stages"]["pretrain_all"]
+        cfg = read_config(Path(__file__).resolve().parents[1] / "configs/sde_in.yaml")
+        stage = cfg["train"]
         epochs = stage["epochs"]
         self.assertGreater(epochs, 0)
         model = torch.nn.Linear(1, 1)
@@ -34,8 +33,7 @@ class PretrainSchedulerTest(unittest.TestCase):
             replacements = {
                 "read_config": lambda _: cfg,
                 "prepare_runtime": lambda *a, **kw: (
-                    torch.device("cpu"), [1], None, [1], model, None, output_dir),
-                "validate_parameter_partition": lambda _: {"meta": 0, "recovery": 2, "shared": 0},
+                    torch.device("cpu"), [1], [1], model, None, output_dir),
                 "make_grad_scaler": lambda *a: None,
                 "train_standard_epoch": train_epoch,
                 "validate": lambda *a, **kw: {"psnr": 1.0},
@@ -45,10 +43,11 @@ class PretrainSchedulerTest(unittest.TestCase):
             }
             for name, replacement in replacements.items():
                 stack.enter_context(patch.object(train_event_dunet, name, replacement))
-            stack.enter_context(patch("sys.argv", ["train_event_dunet.py"]))
+            stack.enter_context(patch("sys.argv", ["train_event_dunet.py", "--config", "configs/sde_in.yaml"]))
             stack.enter_context(patch("builtins.print"))
             train_event_dunet.main()
         self.assertEqual(len(used_rates), epochs)
+        self.assertEqual(len({id(optimizer) for optimizer in optimizers}), 1)
         for epoch, actual in enumerate(used_rates):
             expected = stage["min_lr"] + (stage["lr"] - stage["min_lr"]) * (
                 1 + math.cos(math.pi * epoch / epochs)) / 2

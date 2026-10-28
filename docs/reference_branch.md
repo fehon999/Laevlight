@@ -1,46 +1,48 @@
-# 参考帧特征分支设计
+# 参考帧特征分支
 
-## 设计目标
+四个数据集配置均使用 `reference_affine` 模式。此次整理保留 `ReferenceFeatureInjector` 的网络构造、初始化及前向计算，仅清理原双层训练使用的参数分组和任务重置辅助接口。
 
-1. 保留 EvLight 的 SNR 引导图像–事件融合主干。
-2. 参考帧只提供通道统计，不传递其空间结构，降低运动和视差造成的鬼影。
-3. 通道门控控制参考亮度统计的使用强度，无效参考严格退化到 backbone。
-4. 用单一配置开关完成干净消融；零初始化保证可从原 backbone 安全起步。
+## 特征计算
 
-## 模块
+1. `frame_encoder` 编码正常光参考 RGB，`current_encoder` 编码当前帧的 light-up RGB。二者结构相同，构造时复制初始权重，之后作为独立参数共同训练。
+2. 分别计算当前和参考特征的通道均值、标准差，拼接后输入门控和仿射参数预测模块。
+3. 门控使用 `sigmoid`，预测的对比度与偏移参数使用 `tanh` 限幅。
+4. 对主干的 holistic feature 做一次残差修正，然后进入原 `Unet_ReFormer`。空间内容来自主干，参考帧通过通道统计影响修正。
 
-`ReferenceFeatureInjector` 包含四步：
+令主干特征为 `F`，其通道统计为 `mean(F)` 和 `std(F)`，修正为：
 
-1. **双编码**：正常光参考 RGB 使用元编码器 `frame_encoder`；当前 light-up RGB 使用结构相同但参数独立的 `current_encoder`。构建模型和任务重置时，后者从元编码器复制初始化，随后仍作为 `theta` 独立更新。
-2. **潜空间统计调制**：保留当前特征的归一化空间结构和通道标准差，只用参考特征的通道均值替换当前均值，即 `F_style = std_low * norm(F_low) + mean_ref`。这里没有 VAE 随机采样和 KL loss。
-3. **通道门控**：由两侧潜特征的均值和标准差预测每通道置信度；`reference_valid=false` 时门控严格为零。
-4. **线性残差注入**：拼接当前潜特征与门控调制后的潜特征，通过单个 `1x1 Conv`（逐位置 Linear）投影，并以固定 `residual_scale` 加到 EvLight holistic feature。投影零初始化，因此训练开始时与 baseline 完全一致。
+```text
+gate = sigmoid(gate_network(current_stats || reference_stats)) × reference_valid
+contrast, shift = tanh(affine_network(current_stats || reference_stats))
+output = F + residual_scale × gate × (
+    contrast × (F - mean(F)) + shift × std(F)
+)
+```
 
-旧的位移对齐融合保留为 `fusion_mode=spatial_align`，仅用于消融；默认
-`fusion_mode=latent_stats` 不构建 flow predictor。
+均值和标准差按每个样本、每个通道在空间维度计算。主干修正使用 FP32 计算，再转回输入特征类型；这保持了现有混合精度行为。
 
-## 元表示定义
+## 初始化与有效性
 
-本仓库只把 `ReferenceFeatureInjector.frame_encoder` 定义为元表示 `omega`。`current_encoder`、统计门控、线性投影、`IllumiinationNet` 和 `ImageEnhanceNet` 全部属于任务网络 `theta`，不会进入 outer/meta optimizer。
+当前配置如下：
 
-在双层阶段，support set 用于固定参考编码器 `omega` 后适配 `theta`，query set 用于固定全部 `theta` 后只更新参考编码器。任务微调阶段保留并冻结已学习的参考特征提取器，只重新初始化和训练 `theta`。
+```yaml
+ReferenceBranch:
+  enabled: true
+  encoder_blocks: 2
+  fusion_mode: reference_affine
+  residual_scale: 0.1
+  statistics_eps: 0.000001
+  zero_init: true
+```
 
-## 与近期工作的关系
+`fusion_out` 零初始化，因此起始参考修正为零。第一步先更新最后投影，后续步骤再向上游编码器传播非零梯度。`reference_valid: false` 会将该样本门控置零；`residual_scale: 0` 也可关闭注入。`enabled: false` 则完全不构建参考分支。
 
-- EvLight（CVPR 2024）说明 SNR 引导的区域选择适合在低 SNR 区域使用事件结构，因此本实现保留其主干不动：<https://openaccess.thecvf.com/content/CVPR2024/html/Liang_Towards_Robust_Event-guided_Low-Light_Image_Enhancement_A_Large-Scale_Real-World_Event-Image_CVPR_2024_paper.html>
-- RT-IRE（CVPRW 2024）表明高质量参考特征和残差式细节保留对多曝光恢复有效：<https://openaccess.thecvf.com/content/CVPR2024W/NTIRE/html/Xing_High_Quality_Reference_Feature_for_Two_Stage_Bracketing_Image_Restoration_CVPRW_2024_paper.html>
-- ReBaIR（ICCVW 2025）采用“参考对齐—注意力融合—对 backbone 核心特征做残差细化”的通用参考式恢复范式，本实现采用相同的低侵入注入位置：<https://openaccess.thecvf.com/content/ICCV2025W/AIM/papers/Bernasconi_ReBaIR_Reference-Based_Image_Restoration_ICCVW_2025_paper.pdf>
-- LDIP（ICCV 2025）同样先对齐高质量参考特征，再进行像素级融合，支持把额外参考图像接入既有视频恢复模型：<https://openaccess.thecvf.com/content/ICCV2025/papers/Bernasconi_LDIP_Long_Distance_Information_Propagation_for_Video_Super-Resolution_ICCV_2025_paper.pdf>
-- BiLIE（2025）强调双路特征直接融合会带入事件噪声与结构断裂，支持使用选择性融合而非无条件拼接：<https://arxiv.org/abs/2506.06120>
+`latent_stats` 和 `spatial_align` 的已有实现继续保留，供匹配历史权重或进行结构消融；当前四个配置明确选择 `reference_affine`。不同模式的融合层形状可能不同，加载历史权重前必须匹配 `fusion_mode`，非严格加载也不会忽略同名参数的尺寸不一致。
 
-## 推荐实验
+## 联合训练
 
-在相同数据划分、epoch、学习率和 seed 下比较：
+EvLight 照明网络、图像–事件恢复网络、当前帧编码器、参考帧编码器、门控和融合层全部交给同一个 AdamW 优化器。每批数据只计算一个重建目标，并共同更新全部参数。
 
-1. `enabled=false`：EvLight baseline。
-2. `enabled=true, fusion_mode=latent_stats`：参考均值潜空间调制。
-3. `enabled=true, fusion_mode=spatial_align, use_alignment=true, residual_scale=1.0`：旧空间对齐融合。
-4. 可选：`reference_dropout_probability` 取 `0/0.1/0.3`，验证对参考缺失的鲁棒性。
-5. 检查 `meta_parameters()` 与 `recovery_parameters()` 参数 ID 无交集，确保 outer loop 没有更新 EvLight backbone。
+当前重建损失为 `Charbonnier + 0.5 × LPIPS`。Charbonnier 的实现保持 `sqrt(mean_channel((pred - gt)²) + eps).mean()`，`eps: 0.0001`；LPIPS 使用 AlexNet、`normalize=True`，其特征网络权重冻结。可通过 `loss.ssim_weight` 开启原有 SSIM 损失，四份默认配置均设为 `0`。
 
-除 PSNR/SSIM/LPIPS 外，建议检查运动边缘处的鬼影，并单独统计 `reference_valid=false` 样本，确认完整模型在缺参考时能退化到 baseline。
+网络数据流见 [event_guided_dunet_flow.md](event_guided_dunet_flow.md)，数据集配置与运行方式见 [README](../README.md)。

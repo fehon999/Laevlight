@@ -1,5 +1,3 @@
-from itertools import chain
-
 from torch import nn
 
 from adaptpro.models.egretinex import IllumiinationNet, ImageEnhanceNet
@@ -35,68 +33,6 @@ class MiniEventDUNet(nn.Module):
             self.reference_branch = ReferenceFeatureInjector(**reference_config)
         else:
             self.reference_branch = None
-
-    def shared_parameters(self):
-        return iter(())
-
-    def task_parameters(self):
-        """Return EvLight plus non-meta adapter parameters (theta)."""
-
-        parameter_groups = [
-            self.IllumiinationNet.parameters(),
-            self.ImageEnhanceNet.parameters(),
-        ]
-        if self.reference_branch is not None:
-            parameter_groups.append(self.reference_branch.task_parameters())
-        return chain(*parameter_groups)
-
-    def backbone_parameters(self):
-        """Backward-compatible alias for the complete task parameter group."""
-
-        return self.task_parameters()
-
-    def reference_parameters(self):
-        """Return only reference-frame feature-extractor parameters."""
-
-        if self.reference_branch is None:
-            return iter(())
-        return self.reference_branch.reference_feature_parameters()
-
-    def reference_adapter_parameters(self):
-        """Return the complete adapter for diagnostics, not as a meta group."""
-
-        if self.reference_branch is None:
-            return iter(())
-        return self.reference_branch.parameters()
-
-    def meta_parameters(self):
-        """Return reference feature extraction as the sole meta representation.
-
-        Omega excludes current-frame encoding, statistics/alignment, gating, fusion, and
-        all EvLight weights.
-        """
-
-        return self.reference_parameters()
-
-    def degradation_parameters(self):
-        """Backward-compatible alias for legacy bilevel training code."""
-
-        return self.meta_parameters()
-
-    def recovery_parameters(self):
-        """Return EvLight and reference-fusion task modules as theta."""
-
-        return self.task_parameters()
-
-    def reset_recovery_parameters(self):
-        """Reset theta without modifying the learned reference feature extractor."""
-
-        for root_module in (self.IllumiinationNet, self.ImageEnhanceNet):
-            for module in root_module.modules():
-                if hasattr(module, "reset_parameters"):
-                    module.reset_parameters()
-        if self.reference_branch is not None:
-            self.reference_branch.reset_task_parameters()
 
     def reset_states(self):
         self.ImageEnhanceNet.reset_states()

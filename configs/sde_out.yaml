@@ -1,0 +1,73 @@
+# Independent training and inference configuration for sde_out.
+# Training settings preserve the previous pretrain_all stage.
+seed: 42
+device: auto
+output_dir: outputs/sde_out
+
+data:
+  dataset_id: sde_out
+  name: eglol
+  # Replace with the dataset directory containing train/ and test/.
+  root: data/sde_out
+  train_split: train
+  test_split: test
+  voxel_grid_channel: 32
+  img_height: 256
+  img_width: 256
+  is_split_event: true
+  reference_first_probability: 0.1
+  reference_dropout_probability: 0
+  geometric_augmentation: true
+
+loader:
+  batch_size: 8
+  num_workers: 8
+  drop_last: true
+  test_batch_size: 1
+
+model:
+  IlluNet:
+    base_chs: 48
+    illumination_set: [0]
+  ImageNet:
+    snr_factor: 3
+    voxel_grid_channel: 32
+    base_chs: 48
+    snr_threshold_list: [0.6, 0.5, 0.4]
+  ReferenceBranch:
+    enabled: true
+    encoder_blocks: 2
+    fusion_mode: reference_affine
+    residual_scale: 0.1
+    statistics_eps: 0.000001
+    zero_init: true
+  name: MiniEventDUNet
+  event_channels: 32
+
+loss:
+  charbonnier_weight: 1.0
+  lpips_weight: 0.5
+  ssim_weight: 0.15
+  charbonnier_eps: 0.0001
+  lpips_net: alex
+
+train:
+  # Jointly train all parameters with one optimizer and backward pass.
+  epochs: 50
+  lr: 0.00015
+  lr_scheduler: cosine
+  min_lr: 0.00000001
+  amp: true
+  weight_decay: 0
+  # --resume loads initial weights; optimizer/scheduler state is not restored.
+  resume_strict: false
+
+inference:
+  amp: true
+  checkpoint: outputs/sde_out/best.pt
+  split: test
+  output_dir: outputs/sde_out/inference
+  save_gt: false
+  strict: true
+  print_reference_diagnostics: true
+  reference_diagnostics_interval: 100

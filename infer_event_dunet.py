@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from adaptpro.training import amp_autocast, build_loaders, build_model, move_batch, read_config, resolve_device
+from adaptpro.training import amp_autocast, build_eval_loader, build_model, move_batch, read_config, resolve_device
 from adaptpro.utils import SSIM, load_checkpoint, psnr
 from adaptpro.visualization import Visualization
 
@@ -123,7 +123,11 @@ def run_inference(
     visualizer = Visualization(output_dir, save_keys=("gt",) if save_gt else ())
     ssim = SSIM().to(device)
     metric_logs = []
-    diagnostics = ReferenceInferenceDiagnostics(model) if print_reference_diagnostics else None
+    branch = getattr(model, "reference_branch", None)
+    affine_enabled = branch is not None and branch.fusion_mode == "reference_affine"
+    if print_reference_diagnostics and not affine_enabled:
+        print("Reference diagnostics skipped: the reference_affine branch is not enabled.")
+    diagnostics = ReferenceInferenceDiagnostics(model) if print_reference_diagnostics and affine_enabled else None
     diagnostics_context = diagnostics if diagnostics is not None else nullcontext()
 
     with diagnostics_context:
@@ -165,9 +169,9 @@ def run_inference(
 
 def main():
     parser = argparse.ArgumentParser(description="Inference for Event-guided Mini-DUNet.")
-    parser.add_argument("--config", default="configs/event_mini_dunet_infer.yaml")
+    parser.add_argument("--config", required=True, help="Use the same dataset config as training.")
     parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--split", choices=["train", "validate", "query", "val", "test"], default=None)
+    parser.add_argument("--split", default=None, help="Split directory under data.root (default: test).")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--save-gt", action="store_true")
     parser.add_argument("--strict", action="store_true", help="Use strict checkpoint loading.")
@@ -187,19 +191,10 @@ def main():
 
     device = resolve_device(cfg)
     amp_enabled = bool(infer_cfg.get("amp", True)) and device.type == "cuda"
-    include_query = split in {"validate", "query", "val"}
-    train_loader, query_loader, test_loader = build_loaders(cfg, include_query=include_query)
-    model = build_model(cfg, train_loader, device)
+    loader = build_eval_loader(cfg, split=split)
+    model = build_model(cfg, loader, device)
     load_checkpoint(checkpoint, model, strict=strict)
 
-    loaders = {
-        "train": train_loader,
-        "validate": query_loader,
-        "query": query_loader,
-        "val": query_loader,
-        "test": test_loader,
-    }
-    loader = loaders[split]
     run_inference(
         model,
         loader,

@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import torch
 from torch import nn
@@ -8,12 +8,7 @@ from adaptpro.utils import SSIM
 
 
 class EnhancementLoss(nn.Module):
-    """Paper-style Phi/Psi objectives and omega outer objective.
-
-    Phi optimizes theta / SR on training data.
-    Psi evaluates omega / DE on validation data.
-    Omega combines Psi with the task-aware Phi difference from Eq. (5).
-    """
+    """Original joint-pretraining reconstruction objective."""
 
     def __init__(
         self,
@@ -21,38 +16,22 @@ class EnhancementLoss(nn.Module):
         lpips_weight: float = 0.5,
         charbonnier_eps: float = 1e-4,
         lpips_net: str = "alex",
-        psi_charbonnier_weight: Optional[float] = None,
-        psi_lpips_weight: Optional[float] = None,
-        omega_gamma: float = 1.0,
         ssim_weight: float = 0.0,
-        psi_ssim_weight: Optional[float] = None,
     ):
         super().__init__()
         if charbonnier_eps <= 0:
             raise ValueError(f"charbonnier_eps must be positive, got {charbonnier_eps}.")
-        psi_ssim_weight = ssim_weight if psi_ssim_weight is None else psi_ssim_weight
-        for name, weight in (("ssim_weight", ssim_weight), ("psi_ssim_weight", psi_ssim_weight)):
-            if not math.isfinite(weight) or weight < 0:
-                raise ValueError(f"{name} must be finite and non-negative, got {weight}.")
+        if not math.isfinite(ssim_weight) or ssim_weight < 0:
+            raise ValueError(f"ssim_weight must be finite and non-negative, got {ssim_weight}.")
         self.phi_weights = {
             "charbonnier": charbonnier_weight,
             "lpips": lpips_weight,
             "ssim": ssim_weight,
         }
-        self.psi_weights = {
-            "charbonnier": (
-                charbonnier_weight
-                if psi_charbonnier_weight is None
-                else psi_charbonnier_weight
-            ),
-            "lpips": lpips_weight if psi_lpips_weight is None else psi_lpips_weight,
-            "ssim": psi_ssim_weight,
-        }
         self.charbonnier_eps = charbonnier_eps
-        self.omega_gamma = omega_gamma
-        needs_lpips = self.phi_weights["lpips"] > 0 or self.psi_weights["lpips"] > 0
+        needs_lpips = self.phi_weights["lpips"] > 0
         self.lpips = self._build_lpips(lpips_net) if needs_lpips else None
-        self.ssim = SSIM() if ssim_weight > 0 or psi_ssim_weight > 0 else None
+        self.ssim = SSIM() if ssim_weight > 0 else None
 
     @staticmethod
     def _build_lpips(lpips_net: str):
@@ -108,52 +87,11 @@ class EnhancementLoss(nn.Module):
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
-        # event: Optional[torch.Tensor] = None,
-        # degradation_maps: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         terms = self.reconstruction_terms(pred, target)
         loss, logs = self.combine_terms(terms, self.phi_weights)
         logs = {f"phi_{key}": value for key, value in logs.items()}
         logs["total"] = logs["phi_total"]
-        return loss, logs
-
-    def psi_forward(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        # event: Optional[torch.Tensor] = None,
-        # degradation_maps: Optional[List[torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        terms = self.reconstruction_terms(pred, target)
-        loss, logs = self.combine_terms(terms, self.psi_weights)
-        logs = {f"psi_{key}": value for key, value in logs.items()}
-        logs["total"] = logs["psi_total"]
-        return loss, logs
-
-    def omega_forward(
-        self,
-        psi_loss: torch.Tensor,
-        phi_tilde_loss: torch.Tensor,
-        phi_hat_loss: torch.Tensor,
-        psi_logs: Optional[Dict[str, float]] = None,
-        phi_tilde_logs: Optional[Dict[str, float]] = None,
-        phi_hat_logs: Optional[Dict[str, float]] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        penalty = phi_tilde_loss - phi_hat_loss
-        loss = psi_loss + self.omega_gamma * penalty
-
-        logs = {}
-        if psi_logs:
-            logs.update({f"outer_{key}": value for key, value in psi_logs.items() if key != "total"})
-        if phi_tilde_logs:
-            logs.update({f"tilde_{key}": value for key, value in phi_tilde_logs.items() if key != "total"})
-        if phi_hat_logs:
-            logs.update({f"hat_{key}": value for key, value in phi_hat_logs.items() if key != "total"})
-        logs["omega_psi"] = float(psi_loss.detach().cpu())
-        logs["omega_phi_tilde"] = float(phi_tilde_loss.detach().cpu())
-        logs["omega_phi_hat"] = float(phi_hat_loss.detach().cpu())
-        logs["omega_penalty"] = float(penalty.detach().cpu())
-        logs["total"] = float(loss.detach().cpu())
         return loss, logs
 
     def forward(

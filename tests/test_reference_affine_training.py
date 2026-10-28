@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import torch
@@ -19,18 +20,13 @@ class ReferenceAffineTest(unittest.TestCase):
             channels=8, encoder_blocks=1, fusion_mode="reference_affine", **kwargs
         )
 
-    def test_zero_initialization_and_reset_preserve_backbone(self):
+    def test_zero_initialization_preserves_backbone(self):
         injector = self.injector()
         args = (self.feature, self.current, self.reference, torch.tensor([True, True]))
         self.assertTrue(torch.equal(injector(*args), self.feature))
         with torch.no_grad():
             injector.fusion_out.bias.fill_(0.8)
         self.assertFalse(torch.equal(injector(*args), self.feature))
-        reference_before = [p.detach().clone() for p in injector.reference_feature_parameters()]
-        injector.reset_task_parameters()
-        self.assertTrue(torch.equal(injector(*args), self.feature))
-        for before, after in zip(reference_before, injector.reference_feature_parameters()):
-            self.assertTrue(torch.equal(before, after))
 
     def test_invalid_reference_has_no_output_or_gradient_contribution(self):
         injector = self.injector(zero_init=False)
@@ -90,21 +86,28 @@ class StructuralLossTest(unittest.TestCase):
         improved = pred.detach() - pred.grad * 0.1
         self.assertLess(criterion.ssim_loss(improved, self.target).item(), loss.item())
 
-    def test_phi_psi_weights_and_disabled_loss_are_backward_compatible(self):
+    def test_original_pretraining_loss_and_optional_ssim_are_preserved(self):
         pred = self.target * 0.5
         legacy = EnhancementLoss(lpips_weight=0.0)
         old_loss, old_logs = legacy(pred, self.target)
         self.assertIsNone(legacy.ssim)
         self.assertNotIn("phi_ssim", old_logs)
         self.assertTrue(torch.equal(old_loss, legacy.charbonnier_loss(pred, self.target)))
-        criterion = EnhancementLoss(
-            lpips_weight=0.0, ssim_weight=0.1, psi_ssim_weight=0.2
-        )
+        criterion = EnhancementLoss(lpips_weight=0.0, ssim_weight=0.1)
         phi, logs = criterion.phi_forward(pred, self.target)
-        psi, _ = criterion.psi_forward(pred, self.target)
         self.assertIn("phi_ssim", logs)
         torch.testing.assert_close(phi - old_loss, 0.1 * criterion.ssim_loss(pred, self.target))
-        torch.testing.assert_close(psi - phi, 0.1 * criterion.ssim_loss(pred, self.target))
+        forward_loss, forward_logs = criterion(pred, self.target)
+        torch.testing.assert_close(forward_loss, phi, rtol=0, atol=0)
+        self.assertEqual(forward_logs, logs)
+
+    def test_charbonnier_keeps_original_channel_reduction_and_epsilon(self):
+        criterion = EnhancementLoss(lpips_weight=0.0, charbonnier_eps=1e-4)
+        pred = torch.tensor([0.3, 0.4, 0.0]).reshape(1, 3, 1, 1)
+        loss, logs = criterion(pred, torch.zeros_like(pred))
+        expected = math.sqrt((0.3 ** 2 + 0.4 ** 2) / 3 + 1e-4)
+        self.assertAlmostEqual(loss.item(), expected, places=7)
+        self.assertEqual(logs["phi_total"], logs["total"])
 
     def test_ssim_uses_fp32_even_under_autocast(self):
         criterion = EnhancementLoss(lpips_weight=0.0, ssim_weight=0.1)
@@ -118,10 +121,9 @@ class StructuralLossTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(pred.grad).all())
 
     def test_invalid_structural_weights_are_rejected(self):
-        for name in ("ssim_weight", "psi_ssim_weight"):
-            for value in (-0.1, float("nan"), float("inf")):
-                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
-                    EnhancementLoss(lpips_weight=0.0, **{name: value})
+        for value in (-0.1, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                EnhancementLoss(lpips_weight=0.0, ssim_weight=value)
 
 
 class JointTrainingTest(unittest.TestCase):
@@ -168,10 +170,8 @@ class JointTrainingTest(unittest.TestCase):
             self.assertTrue(grads)
             self.assertTrue(all(torch.isfinite(g).all() for g in grads))
             self.assertGreater(sum(g.abs().sum().item() for g in grads), 0.0)
-        meta_ids = {id(p) for p in model.meta_parameters()}
-        task_ids = {id(p) for p in model.task_parameters()}
-        self.assertFalse(meta_ids & task_ids)
-        self.assertEqual(meta_ids | task_ids, {id(p) for p in model.parameters()})
+        optimized_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
+        self.assertEqual(optimized_ids, {id(p) for p in model.parameters()})
         self.assertTrue(all(p.requires_grad for p in model.parameters()))
 
 
