@@ -70,10 +70,10 @@ python train_event_dunet.py --config configs/sdsd_out.yaml
 各数据集输出目录包含：
 
 - `pretrain_all_latest.pt`：最近一轮权重与训练轮数、配置、测试结果。
-- `best.pt`：测试 PSNR 最高的一轮权重。
+- `best.pt`：测试集平均 SSIM 最高的一轮权重，记录 `best_ssim`；分数相同时保留较早的一轮。
 - `global_last.pt`：全部训练结束后的权重与最终测试结果。
 
-这些文件名沿用原预训练流程。`best.pt` 继续按测试 PSNR 选取，因此该测试集参与了模型选择，不能将其当作完全独立的最终评估集。
+这些文件名沿用原预训练流程。`best.pt` 按测试集平均 SSIM 选取，PSNR 和损失仅作记录；因此该测试集参与了模型选择，不能将其当作完全独立的最终评估集。
 
 初始化已有权重时使用：
 

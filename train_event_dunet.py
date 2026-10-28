@@ -50,8 +50,8 @@ def main():
         model.parameters(), train_cfg.get("lr", 1e-4), train_cfg.get("weight_decay", 3e-4),
     )
     scheduler = make_scheduler(optimizer, train_cfg)
-    best_psnr = -1.0
-    # Preserve the original pretraining checkpoint names and metadata.
+    best_ssim = float("-inf")
+    # Preserve checkpoint names; best.pt is selected by test SSIM.
     stage = "pretrain_all"
     for epoch in range(1, epochs + 1):
         print(f"[{stage}] epoch {epoch}: lr={optimizer.param_groups[0]['lr']:.8g}")
@@ -63,7 +63,7 @@ def main():
             model, test_loader, criterion, device, desc="pretrain_test", amp_enabled=amp_enabled,
         )
         log_line(stage, epoch, train_logs, test_logs, eval_name="test")
-        best_psnr = save_progress(output_dir, model, cfg, stage, epoch, test_logs, best_psnr)
+        best_ssim = save_progress(output_dir, model, cfg, stage, epoch, test_logs, best_ssim)
         if scheduler is not None:
             scheduler.step()
 

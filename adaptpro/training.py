@@ -248,18 +248,19 @@ def log_line(stage, epoch, train_logs, eval_logs, eval_name="test"):
     print(f"[{stage}] epoch {epoch}: train({train_msg}) {eval_name}({eval_msg})")
 
 
-def save_progress(output_dir, model, cfg, stage, epoch, eval_logs, best_psnr, eval_name="test"):
+def save_progress(output_dir, model, cfg, stage, epoch, eval_logs, best_ssim, eval_name="test"):
+    """Save the latest weights and keep best.pt at the highest evaluation SSIM."""
     save_checkpoint(
         Path(output_dir) / f"{stage}_latest.pt",
         model,
         {"config": cfg, "stage": stage, "epoch": epoch, eval_name: eval_logs},
     )
-    current_psnr = eval_logs.get("psnr", -1.0)
-    if current_psnr > best_psnr:
+    current_ssim = eval_logs["ssim_metric"]
+    if current_ssim > best_ssim:
         save_checkpoint(
             Path(output_dir) / "best.pt",
             model,
-            {"config": cfg, "stage": stage, "epoch": epoch, "best_psnr": current_psnr},
+            {"config": cfg, "stage": stage, "epoch": epoch, "best_ssim": current_ssim},
         )
-        return current_psnr
-    return best_psnr
+        return current_ssim
+    return best_ssim

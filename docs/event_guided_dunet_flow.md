@@ -45,7 +45,7 @@ flowchart TD
     G --> Q{本轮批次完成?}
     Q -- 否 --> B
     Q -- 是 --> T[使用 test 划分评估]
-    T --> S[保存 latest / 按测试 PSNR 更新 best]
+    T --> S[保存 latest / 按测试 SSIM 更新 best]
     S --> L[更新本轮学习率调度]
     L --> N{达到训练轮数?}
     N -- 否 --> E
